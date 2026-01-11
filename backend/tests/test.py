@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import os
@@ -9,7 +8,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
-from model import Generator
+from model import NAFNet
 
 class DeblurDataset(Dataset):
     """Dataset for image deblurring"""
@@ -38,18 +37,19 @@ class DeblurDataset(Dataset):
         
         return blur_img, sharp_img, self.image_files[idx]
 
-def denormalize(tensor):
-    """Convert normalized tensor back to image"""
+def tensor_to_image(tensor):
+    """Convert tensor to numpy image"""
     img = tensor.cpu().clone()
-    img = img * 0.5 + 0.5  # Denormalize from [-1, 1] to [0, 1]
-    img = img.clamp(0, 1)
+    if img.dim() == 4:
+        img = img.squeeze(0)
     img = img.permute(1, 2, 0).numpy()
-    return (img * 255).astype(np.uint8)
+    img = (img * 255).clip(0, 255).astype(np.uint8)
+    return img
 
 def calculate_metrics(deblurred, sharp):
     """Calculate PSNR and SSIM metrics"""
-    deblurred_np = denormalize(deblurred)
-    sharp_np = denormalize(sharp)
+    deblurred_np = tensor_to_image(deblurred)
+    sharp_np = tensor_to_image(sharp)
     
     psnr_value = psnr(sharp_np, deblurred_np, data_range=255)
     ssim_value = ssim(sharp_np, deblurred_np, channel_axis=2, data_range=255)
@@ -58,7 +58,7 @@ def calculate_metrics(deblurred, sharp):
 
 def test_model(config):
     """
-    Test DeblurGAN-v2 model on test set
+    Test NAFNet model on test set
     
     Args:
         config: Dictionary with test configuration
@@ -70,7 +70,6 @@ def test_model(config):
     # Data transforms
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
     # Test dataset
@@ -88,11 +87,12 @@ def test_model(config):
     )
     
     # Load model
-    generator = Generator(
-        in_channels=3,
-        out_channels=3,
-        base_channels=config['base_channels'],
-        num_residual_blocks=config['num_residual_blocks']
+    model = NAFNet(
+        img_channel=3,
+        width=config['width'],
+        middle_blk_num=config['middle_blk_num'],
+        enc_blk_nums=config['enc_blk_nums'],
+        dec_blk_nums=config['dec_blk_nums']
     ).to(device)
     
     # Load checkpoint
@@ -102,8 +102,8 @@ def test_model(config):
         raise FileNotFoundError(f"Model checkpoint not found: {checkpoint_path}")
     
     print(f"Loading model from {checkpoint_path}")
-    generator.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    generator.eval()
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.eval()
     
     # Create output directory
     output_dir = config['output_dir']
@@ -122,7 +122,7 @@ def test_model(config):
             sharp_imgs = sharp_imgs.to(device)
             
             # Generate deblurred images
-            deblurred_imgs = generator(blur_imgs)
+            deblurred_imgs = model(blur_imgs)
             
             # Calculate metrics
             for i in range(blur_imgs.size(0)):
@@ -136,19 +136,19 @@ def test_model(config):
                     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
                     
                     # Blurred image
-                    blur_np = denormalize(blur_imgs[i])
+                    blur_np = tensor_to_image(blur_imgs[i])
                     axes[0].imshow(blur_np)
                     axes[0].set_title('Blurred Input')
                     axes[0].axis('off')
                     
                     # Deblurred image
-                    deblurred_np = denormalize(deblurred_imgs[i])
+                    deblurred_np = tensor_to_image(deblurred_imgs[i])
                     axes[1].imshow(deblurred_np)
                     axes[1].set_title(f'Deblurred Output\nPSNR: {psnr_val:.2f} dB\nSSIM: {ssim_val:.4f}')
                     axes[1].axis('off')
                     
                     # Ground truth
-                    sharp_np = denormalize(sharp_imgs[i])
+                    sharp_np = tensor_to_image(sharp_imgs[i])
                     axes[2].imshow(sharp_np)
                     axes[2].set_title('Ground Truth')
                     axes[2].axis('off')
@@ -184,11 +184,11 @@ def test_model(config):
     # Create comparison grid
     if config['save_visualizations'] and num_samples > 0:
         print("\nCreating comparison grid...")
-        create_comparison_grid(test_loader, generator, device, output_dir, num_samples=min(9, num_samples))
+        create_comparison_grid(test_loader, model, device, output_dir, num_samples=min(9, num_samples))
 
-def create_comparison_grid(test_loader, generator, device, output_dir, num_samples=9):
+def create_comparison_grid(test_loader, model, device, output_dir, num_samples=9):
     """Create a grid of comparisons"""
-    generator.eval()
+    model.eval()
     
     samples_collected = 0
     blur_list = []
@@ -202,11 +202,11 @@ def create_comparison_grid(test_loader, generator, device, output_dir, num_sampl
             
             blur_imgs = blur_imgs.to(device)
             sharp_imgs = sharp_imgs.to(device)
-            deblurred_imgs = generator(blur_imgs)
+            deblurred_imgs = model(blur_imgs)
             
-            blur_list.append(denormalize(blur_imgs[0]))
-            deblurred_list.append(denormalize(deblurred_imgs[0]))
-            sharp_list.append(denormalize(sharp_imgs[0]))
+            blur_list.append(tensor_to_image(blur_imgs[0]))
+            deblurred_list.append(tensor_to_image(deblurred_imgs[0]))
+            sharp_list.append(tensor_to_image(sharp_imgs[0]))
             samples_collected += 1
     
     # Create grid
@@ -220,9 +220,9 @@ def create_comparison_grid(test_loader, generator, device, output_dir, num_sampl
         col = (i % cols) * 3
         
         if rows == 1:
-            ax_blur = axes[col]
-            ax_deblur = axes[col + 1]
-            ax_sharp = axes[col + 2]
+            ax_blur = axes[col] if cols > 1 else axes
+            ax_deblur = axes[col + 1] if cols > 1 else axes
+            ax_sharp = axes[col + 2] if cols > 1 else axes
         else:
             ax_blur = axes[row, col]
             ax_deblur = axes[row, col + 1]
@@ -241,14 +241,16 @@ def create_comparison_grid(test_loader, generator, device, output_dir, num_sampl
         ax_sharp.axis('off')
     
     # Hide unused subplots
-    for i in range(num_samples, rows * cols):
-        row = i // cols
-        for j in range(3):
-            col = (i % cols) * 3 + j
-            if rows == 1:
-                axes[col].axis('off')
-            else:
-                axes[row, col].axis('off')
+    if rows > 1 or cols > 1:
+        for i in range(num_samples, rows * cols):
+            row = i // cols
+            for j in range(3):
+                col = (i % cols) * 3 + j
+                if rows == 1:
+                    if cols > 1:
+                        axes[col].axis('off')
+                else:
+                    axes[row, col].axis('off')
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'comparison_grid.png'), 
@@ -262,10 +264,12 @@ if __name__ == '__main__':
     config = {
         'data_dir': './deblur_dataset',
         'checkpoint_dir': './checkpoints',
-        'model_name': 'generator_final.pth',  # or 'checkpoint_epoch_X.pth'
+        'model_name': 'nafnet_final.pth',
         'output_dir': './test_results',
-        'base_channels': 64,
-        'num_residual_blocks': 9,
+        'width': 32,
+        'middle_blk_num': 12,
+        'enc_blk_nums': [2, 2, 4, 8],
+        'dec_blk_nums': [2, 2, 2, 2],
         'save_visualizations': True
     }
     

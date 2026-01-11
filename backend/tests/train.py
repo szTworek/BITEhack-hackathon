@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from model import Generator, Discriminator, PerceptualLoss, weights_init
+from model import NAFNet, download_pretrained_weights
 
 class DeblurDataset(Dataset):
     """Dataset for image deblurring"""
@@ -37,9 +37,31 @@ class DeblurDataset(Dataset):
         
         return blur_img, sharp_img
 
-def train_deblur_gan(config):
+class PSNRLoss(nn.Module):
+    """PSNR Loss"""
+    def __init__(self, loss_weight=1.0, reduction='mean', toY=False):
+        super().__init__()
+        self.loss_weight = loss_weight
+        self.scale = 10 / np.log(10)
+        self.toY = toY
+        self.coef = torch.tensor([65.481, 128.553, 24.966]).reshape(1, 3, 1, 1)
+        self.first = True
+
+    def forward(self, pred, target):
+        assert len(pred.size()) == 4
+        if self.toY:
+            if self.first:
+                self.coef = self.coef.to(pred.device)
+                self.first = False
+            pred = (pred * self.coef).sum(dim=1).unsqueeze(dim=1) + 16.
+            target = (target * self.coef).sum(dim=1).unsqueeze(dim=1) + 16.
+            pred, target = pred / 255., target / 255.
+        
+        return self.loss_weight * self.scale * torch.log(((pred - target) ** 2).mean(dim=(1, 2, 3)) + 1e-8).mean()
+
+def train_nafnet(config):
     """
-    Train DeblurGAN-v2
+    Train NAFNet for deblurring
     
     Args:
         config: Dictionary with training configuration
@@ -51,7 +73,6 @@ def train_deblur_gan(config):
     # Data transforms
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
     
     # Datasets
@@ -69,163 +90,116 @@ def train_deblur_gan(config):
         pin_memory=True
     )
     
-    # Models
-    generator = Generator(
-        in_channels=3,
-        out_channels=3,
-        base_channels=config['base_channels'],
-        num_residual_blocks=config['num_residual_blocks']
+    # Model
+    model = NAFNet(
+        img_channel=3,
+        width=config['width'],
+        middle_blk_num=config['middle_blk_num'],
+        enc_blk_nums=config['enc_blk_nums'],
+        dec_blk_nums=config['dec_blk_nums']
     ).to(device)
     
-    discriminator = Discriminator(
-        in_channels=3,
-        base_channels=config['base_channels']
-    ).to(device)
+    # Load pretrained weights if specified
+    start_epoch = 0
+    if config.get('use_pretrained'):
+        pretrained_path = download_pretrained_weights()
+        if pretrained_path and os.path.exists(pretrained_path):
+            print(f"Loading pretrained weights from {pretrained_path}")
+            try:
+                state_dict = torch.load(pretrained_path, map_location=device)
+                # Handle different state dict formats
+                if 'params' in state_dict:
+                    state_dict = state_dict['params']
+                elif 'state_dict' in state_dict:
+                    state_dict = state_dict['state_dict']
+                
+                # Load with strict=False to allow partial loading
+                model.load_state_dict(state_dict, strict=False)
+                print("Pretrained weights loaded successfully!")
+            except Exception as e:
+                print(f"Warning: Could not load pretrained weights: {e}")
+                print("Training from scratch instead.")
+        else:
+            print("No pretrained weights available. Training from scratch.")
     
-    # Initialize weights
-    generator.apply(weights_init)
-    discriminator.apply(weights_init)
+    # Resume from checkpoint if specified
+    if config.get('resume_checkpoint'):
+        print(f"Resuming from checkpoint {config['resume_checkpoint']}")
+        checkpoint = torch.load(config['resume_checkpoint'], map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        start_epoch = checkpoint['epoch']
+        print(f"Resuming from epoch {start_epoch}")
     
-    # Loss functions
-    criterion_gan = nn.MSELoss()
-    criterion_pixel = nn.L1Loss()
-    perceptual_loss = PerceptualLoss().to(device)
+    # Loss function
+    criterion = PSNRLoss()
     
-    # Optimizers
-    optimizer_g = optim.Adam(
-        generator.parameters(),
+    # Optimizer
+    optimizer = optim.AdamW(
+        model.parameters(),
         lr=config['lr'],
-        betas=(0.5, 0.999)
+        betas=(0.9, 0.9),
+        weight_decay=0.0
     )
     
-    optimizer_d = optim.Adam(
-        discriminator.parameters(),
-        lr=config['lr'],
-        betas=(0.5, 0.999)
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config['epochs'],
+        eta_min=1e-6  # Changed from 1e-7 to 1e-6
     )
-    
-    # Learning rate schedulers
-    scheduler_g = optim.lr_scheduler.StepLR(optimizer_g, step_size=50, gamma=0.5)
-    scheduler_d = optim.lr_scheduler.StepLR(optimizer_d, step_size=50, gamma=0.5)
     
     # Training history
     history = {
-        'g_loss': [],
-        'd_loss': [],
-        'pixel_loss': [],
-        'perceptual_loss': [],
-        'gan_loss': []
+        'train_loss': [],
     }
     
     # Training loop
     print(f"\nStarting training for {config['epochs']} epochs...")
     
-    for epoch in range(config['epochs']):
-        generator.train()
-        discriminator.train()
+    for epoch in range(start_epoch, start_epoch + config['epochs']):
+        model.train()
+        epoch_loss = 0
         
-        epoch_g_loss = 0
-        epoch_d_loss = 0
-        epoch_pixel_loss = 0
-        epoch_perceptual_loss = 0
-        epoch_gan_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{start_epoch + config['epochs']}")
         
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['epochs']}")
-        
-        for i, (blur_imgs, sharp_imgs) in enumerate(pbar):
+        for blur_imgs, sharp_imgs in pbar:
             blur_imgs = blur_imgs.to(device)
             sharp_imgs = sharp_imgs.to(device)
             
-            batch_size = blur_imgs.size(0)
+            # Forward pass
+            optimizer.zero_grad()
+            pred_imgs = model(blur_imgs)
             
-            # -----------------
-            # Train Generator
-            # -----------------
-            optimizer_g.zero_grad()
+            # Calculate loss
+            loss = criterion(pred_imgs, sharp_imgs)
             
-            # Generate deblurred images
-            deblurred_imgs = generator(blur_imgs)
+            # Backward pass
+            loss.backward()
+            optimizer.step()
             
-            # Adversarial loss
-            pred_fake = discriminator(deblurred_imgs)
-            valid = torch.ones_like(pred_fake).to(device)
-            loss_gan = criterion_gan(pred_fake, valid)
+            epoch_loss += loss.item()
             
-            # Pixel loss
-            loss_pixel = criterion_pixel(deblurred_imgs, sharp_imgs)
-            
-            # Perceptual loss
-            loss_perceptual = perceptual_loss(deblurred_imgs, sharp_imgs)
-            
-            # Total generator loss
-            loss_g = (config['lambda_pixel'] * loss_pixel + 
-                     config['lambda_perceptual'] * loss_perceptual +
-                     config['lambda_gan'] * loss_gan)
-            
-            loss_g.backward()
-            optimizer_g.step()
-            
-            # ---------------------
-            # Train Discriminator
-            # ---------------------
-            optimizer_d.zero_grad()
-            
-            # Real loss
-            pred_real = discriminator(sharp_imgs)
-            valid = torch.ones_like(pred_real).to(device)
-            loss_real = criterion_gan(pred_real, valid)
-            
-            # Fake loss
-            pred_fake = discriminator(deblurred_imgs.detach())
-            fake = torch.zeros_like(pred_fake).to(device)
-            loss_fake = criterion_gan(pred_fake, fake)
-            
-            # Total discriminator loss
-            loss_d = (loss_real + loss_fake) / 2
-            
-            loss_d.backward()
-            optimizer_d.step()
-            
-            # Update metrics
-            epoch_g_loss += loss_g.item()
-            epoch_d_loss += loss_d.item()
-            epoch_pixel_loss += loss_pixel.item()
-            epoch_perceptual_loss += loss_perceptual.item()
-            epoch_gan_loss += loss_gan.item()
-            
-            pbar.set_postfix({
-                'G_loss': loss_g.item(),
-                'D_loss': loss_d.item(),
-                'Pixel': loss_pixel.item()
-            })
+            pbar.set_postfix({'Loss': loss.item()})
         
-        # Average losses
-        num_batches = len(train_loader)
-        history['g_loss'].append(epoch_g_loss / num_batches)
-        history['d_loss'].append(epoch_d_loss / num_batches)
-        history['pixel_loss'].append(epoch_pixel_loss / num_batches)
-        history['perceptual_loss'].append(epoch_perceptual_loss / num_batches)
-        history['gan_loss'].append(epoch_gan_loss / num_batches)
+        # Update learning rate
+        scheduler.step()
         
-        # Update learning rates
-        scheduler_g.step()
-        scheduler_d.step()
+        # Average loss
+        avg_loss = epoch_loss / len(train_loader)
+        history['train_loss'].append(avg_loss)
         
         # Print epoch summary
-        print(f"\nEpoch {epoch+1}/{config['epochs']} Summary:")
-        print(f"  G_loss: {history['g_loss'][-1]:.4f}")
-        print(f"  D_loss: {history['d_loss'][-1]:.4f}")
-        print(f"  Pixel_loss: {history['pixel_loss'][-1]:.4f}")
-        print(f"  Perceptual_loss: {history['perceptual_loss'][-1]:.4f}")
+        print(f"\nEpoch {epoch+1}/{start_epoch + config['epochs']} Summary:")
+        print(f"  Average Loss: {avg_loss:.4f}")
+        print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.7f}")
         
         # Save checkpoint
         if (epoch + 1) % config['save_interval'] == 0:
             checkpoint = {
                 'epoch': epoch + 1,
-                'generator_state_dict': generator.state_dict(),
-                'discriminator_state_dict': discriminator.state_dict(),
-                'optimizer_g_state_dict': optimizer_g.state_dict(),
-                'optimizer_d_state_dict': optimizer_d.state_dict(),
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'history': history
             }
             torch.save(checkpoint, os.path.join(config['checkpoint_dir'], 
@@ -233,37 +207,18 @@ def train_deblur_gan(config):
             print(f"Checkpoint saved at epoch {epoch+1}")
     
     # Save final model
-    torch.save(generator.state_dict(), os.path.join(config['checkpoint_dir'], 'generator_final.pth'))
-    torch.save(discriminator.state_dict(), os.path.join(config['checkpoint_dir'], 'discriminator_final.pth'))
+    torch.save(model.state_dict(), os.path.join(config['checkpoint_dir'], 'nafnet_final.pth'))
     
-    # Plot training curves
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 3, 1)
-    plt.plot(history['g_loss'], label='Generator Loss')
-    plt.plot(history['d_loss'], label='Discriminator Loss')
+    # Plot training curve
+    plt.figure(figsize=(10, 5))
+    plt.plot(history['train_loss'], label='Training Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
-    plt.title('GAN Losses')
-    
-    plt.subplot(1, 3, 2)
-    plt.plot(history['pixel_loss'], label='Pixel Loss (L1)')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Pixel-wise Loss')
-    
-    plt.subplot(1, 3, 3)
-    plt.plot(history['perceptual_loss'], label='Perceptual Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.title('Perceptual Loss')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(config['checkpoint_dir'], 'training_curves.png'))
-    print(f"\nTraining curves saved to {config['checkpoint_dir']}/training_curves.png")
+    plt.title('NAFNet Training Loss')
+    plt.grid(True)
+    plt.savefig(os.path.join(config['checkpoint_dir'], 'training_curve.png'))
+    print(f"\nTraining curve saved to {config['checkpoint_dir']}/training_curve.png")
     
     print("\nTraining completed!")
 
@@ -272,19 +227,22 @@ if __name__ == '__main__':
     config = {
         'data_dir': './deblur_dataset',
         'checkpoint_dir': './checkpoints',
-        'batch_size': 4,
-        'epochs': 1,
-        'lr': 0.0001,
-        'base_channels': 64,
-        'num_residual_blocks': 9,
-        'lambda_pixel': 100,
-        'lambda_perceptual': 10,
-        'lambda_gan': 1,
-        'save_interval': 10
+        'batch_size': 10,
+        'epochs': 5,
+        'lr': 0.0005,  # Increased for fine-tuning (was 0.0001)
+        'width': 32,
+        'middle_blk_num': 12,
+        'enc_blk_nums': [2, 2, 4, 8],
+        'dec_blk_nums': [2, 2, 2, 2],
+        'save_interval': 10,
+        
+        # Fine-tuning options
+        'use_pretrained': True,  # Set to True to use pretrained weights
+        'resume_checkpoint': None,  # Path to resume training
     }
     
     # Create checkpoint directory
     os.makedirs(config['checkpoint_dir'], exist_ok=True)
     
     # Train model
-    train_deblur_gan(config)
+    train_nafnet(config)

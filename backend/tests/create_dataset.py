@@ -5,41 +5,12 @@ from pathlib import Path
 import random
 from tqdm import tqdm
 
-def apply_motion_blur(img, kernel_size=15):
-    """Apply motion blur with random angle"""
-    kernel = np.zeros((kernel_size, kernel_size))
-    angle = random.uniform(0, 180)
-    
-    # Create motion blur kernel
-    xs, xe = random.randint(0, kernel_size-1), random.randint(0, kernel_size-1)
-    if xs == xe:
-        kernel[:, xs] = 1
-    else:
-        ys, ye = random.randint(0, kernel_size-1), random.randint(0, kernel_size-1)
-        cv2.line(kernel, (xs, ys), (xe, ye), 1, thickness=1)
-    
-    kernel = kernel / kernel.sum()
-    
-    # Rotate kernel
-    M = cv2.getRotationMatrix2D((kernel_size//2, kernel_size//2), angle, 1)
-    kernel = cv2.warpAffine(kernel, M, (kernel_size, kernel_size))
-    kernel = kernel / kernel.sum()
-    
-    return cv2.filter2D(img, -1, kernel)
-
-KERNEL_SIZE = 9
+KERNEL_SIZE = 101
 
 def apply_gaussian_blur(img, kernel_size=KERNEL_SIZE):
     """Apply Gaussian blur"""
     sigma = random.uniform(1, 5)
     return cv2.GaussianBlur(img, (kernel_size, kernel_size), sigma)
-
-def apply_defocus_blur(img, kernel_size=15):
-    """Apply defocus blur using circular kernel"""
-    kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
-    cv2.circle(kernel, (kernel_size//2, kernel_size//2), kernel_size//4, 1, -1)
-    kernel = kernel / kernel.sum()
-    return cv2.filter2D(img, -1, kernel)
 
 def create_blurred_dataset(input_path, output_dir, train_ratio=0.8, img_size=256):
     """
