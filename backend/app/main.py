@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.routers.points import router as points_router
 
 app = FastAPI(title="Hackathon API")
 
@@ -10,6 +11,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(points_router)
 
 
 @app.get("/")

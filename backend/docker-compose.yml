@@ -15,10 +15,24 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   backend:
     build: .
     environment:
       DATABASE_URL: postgresql://hackathon:hackathon@db:5432/hackathon
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -26,7 +40,42 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --reload
+
+  celery-worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://hackathon:hackathon@db:5432/hackathon
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.celery_app:celery_app worker --loglevel=info
+
+  celery-beat:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://hackathon:hackathon@db:5432/hackathon
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    command: celery -A app.celery_app:celery_app beat --loglevel=info
 
 volumes:
   postgres_data:
+  redis_data:

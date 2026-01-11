@@ -4,3 +4,11 @@ sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 pydantic-settings==2.7.0
 python-dotenv==1.0.1
+celery[redis]==5.4.0
+redis==5.0.1
+requests>=2.31.0
+numpy>=1.24.0
+tifffile>=2023.0.0
+scipy>=1.11.0
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0
