@@ -90,4 +90,4 @@ npm start
 
 ---
 
-Built at BITEhack Hackathon by [Szymon Tworek](https://github.com/szTworek) and [Robert Raniszewski](https://github.com/raniszewski-robert)
+Built at BITEhack Hackathon by [Szymon Tworek](https://github.com/szTworek), [Robert Raniszewski](https://github.com/raniszewski-robert), [Albert Arnautov](https://github.com/alargh) and [Iwo Zowada](https://github.com/Iwo-Z)
