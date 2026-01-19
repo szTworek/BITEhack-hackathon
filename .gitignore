@@ -1,0 +1,30 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Docker volumes
+postgres_data/
+
+backend/**/*.Identifier
+backend/**/*.webp
+backend/**/*.png
+backend/**/*.yaml
+backend/**/*.jpg
+backend/**/*.txt
+backend/**/*.pth
+backend/**/*.cache
+runs/**/*.jpg
+runs/**/*.pt
+runs/**/*.png
+runs/**/*.yaml
+*.csv
