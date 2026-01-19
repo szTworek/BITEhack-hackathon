@@ -14,3 +14,15 @@ venv/
 
 # Docker volumes
 postgres_data/
+*.jpg
+*.png
+*.pth
+*.txt
+*.jpg
+*.Identifier
+*.webp
+*.cache
+*.csv
+*.pt
+*.yaml
+yolov8_ship_det_satellite/
